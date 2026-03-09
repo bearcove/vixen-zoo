@@ -10,23 +10,27 @@ let core_sources = [
   "lfunc.c", "lgc.c", "llex.c", "lmem.c", "lobject.c", "lopcodes.c",
   "lparser.c", "lstate.c", "lstring.c", "ltable.c", "ltm.c",
   "lundump.c", "lvm.c", "lzio.c", "ltests.c",
-]
+];
 
-let aux_sources = ["lauxlib.c"]
+let aux_sources = ["lauxlib.c"];
 
 let lib_sources = [
   "lbaselib.c", "ldblib.c", "liolib.c", "lmathlib.c", "loslib.c",
   "ltablib.c", "lstrlib.c", "lutf8lib.c", "loadlib.c", "lcorolib.c",
   "linit.c",
-]
+];
 
-let all_lib_sources = [..core_sources, ..aux_sources, ..lib_sources]
+let all_lib_sources = [..core_sources, ..aux_sources, ..lib_sources];
 
 // --- Toolchain discovery ---
 
 struct DiscoveredTool {
   path: String,
   hash: Blob,
+}
+
+fn stringify(self: DiscoveredTool) -> String {
+    self.path
 }
 
 fn discover_tool(class: ExecutorClass, name: String) -> DiscoveredTool {
@@ -72,14 +76,16 @@ fn discover_c_toolchain(class: ExecutorClass) -> CToolchain {
 
 // --- Build context ---
 
-struct CBuild {
-  toolchain: CToolchain,
-  src: Tree,
-  cflags: Array[String],
-}
+let toolchain = discover_c_toolchain(executor_class("default"));
+let {cc, ar, ranlib} = toolchain;
 
-// Shadow exec with writable defaulted
-let exec = exec(..; writable: [@"out"])
+let cexec = exec(..;
+    verifier: toolchain.verifier,
+    observer: tree_observer,
+).map($.next());
+let cflags = ["-Wall", "-O2", "-std=c99", "-DLUA_USE_LINUX"];
+let ldflags = ["-Wl,-E"];
+let syslibs = ["-lm","-dl"];
 
 // --- Helpers ---
 
@@ -87,98 +93,45 @@ fn obj_name(file: String) -> String {
   file.replace(".c", ".o")
 }
 
-fn file_observer(label: String, path: Path) -> Fn(Process, Vfs) -> Stream[Blob] {
-  (proc, vfs) => {
+fn tree_observer(proc: Process, vfs: Vfs) -> Tree {
     if proc.exit_code != 0 {
-      let stderr_text = proc.stderr.to_array().join("");
-      fail `${label}: ${stderr_text}`
+      fail `${process}: ${proc.stderr}`
     };
-    Stream.of(vfs.file(path))
-  }
-}
-
-fn tree_observer(label: String, path: Path) -> Fn(Process, Vfs) -> Stream[Tree] {
-  (proc, vfs) => {
-    if proc.exit_code != 0 {
-      let stderr_text = proc.stderr.to_array().join("");
-      fail `${label}: ${stderr_text}`
-    };
-    Stream.of(vfs.subtree(path))
-  }
-}
-
-// --- Compilation (UFCS: ctx.compile(file)) ---
-
-fn compile(ctx: CBuild, file: String) -> Blob {
-  let oname = obj_name(file);
-  exec[Blob](
-    [ctx.toolchain.cc.path, "-c", ..ctx.cflags, "-o", @`out/${oname}`, file],
-    mounts: ctx.src,
-    verifier: ctx.toolchain.verifier,
-    observer: file_observer(`cc ${file}`, @`out/${oname}`),
-  ).to_array()[0]
-}
-
-// --- Archiving (UFCS: ctx.archive(objs, "liblua.a")) ---
-
-fn archive(ctx: CBuild, objs: Tree, output_name: String) -> Blob {
-  let archived = exec[Tree](
-    [ctx.toolchain.ar.path, "rc", @`out/${output_name}`, ..objs],
-    verifier: ctx.toolchain.verifier,
-    observer: tree_observer(`ar ${output_name}`, @"out"),
-  ).to_array()[0];
-
-  exec[Blob](
-    [ctx.toolchain.ranlib.path, output_name],
-    mounts: archived,
-    writable: [output_name],
-    verifier: ctx.toolchain.verifier,
-    observer: file_observer(`ranlib ${output_name}`, @`${output_name}`),
-  ).to_array()[0]
-}
-
-// --- Linking (UFCS: ctx.link(objs, "lua"; ...)) ---
-
-fn link(
-  ctx: CBuild,
-  objs: Tree,
-  output_name: String;
-  libs: Tree = Tree.empty(),
-  ldflags: Array[String] = [],
-  syslibs: Array[String] = [],
-) -> Blob {
-  exec[Blob](
-    [ctx.toolchain.cc.path, "-o", @`out/${output_name}`,
-     ..ldflags, ..objs, ..libs, ..syslibs],
-    verifier: ctx.toolchain.verifier,
-    observer: file_observer(`link ${output_name}`, @`out/${output_name}`),
-  ).to_array()[0]
+    vfs.subtree(@"out")
 }
 
 // --- Build entry point ---
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree {
-  let ctx = CBuild {
-    toolchain: discover_c_toolchain(executor_class("default")),
-    src: Tree.from_path(ws),
-    cflags: ["-Wall", "-O2", "-std=c99", "-DLUA_USE_LINUX"],
-  };
+  let src = Tree.from_path(ws);
 
-  // Compile all library sources concurrently
-  let lib_objs = Tree.of(all_lib_sources.map((file) => {
-    (obj_name(file), ctx.compile(file))
-  }).to_map());
+  fn compile(file: Path) -> Tree {
+    cexec(
+      [cc, "-c", ..cflags, "-o", @`out/obj`, file],
+      mounts: %{ "src" => src },
+    )
+  }
 
-  let liblua = ctx.archive(lib_objs, "liblua.a");
+  fn archive(objs: Tree) -> Tree {
+    // TODO: two execs is wasteful, should find a way to exec two things. ideas:
+    // 1) ship a bash script (terrible)
+    // 2) ship a vixen closure (amazing) — changes the model though
+    // 3) that's a scheduler detail, it can recognize the dep and schedule both
+    //    back-to-back on the same node
+    cexec([ar, "rc", @`out/liblua.a`, ..objs]) |>
+    cexec([ranlib, $])
+  }
 
-  // Compile and link the interpreter
-  let lua_objs = Tree.of(%{ "lua.o" => ctx.compile("lua.c") });
+  fn link(
+    objs: Tree,
+  ) -> Tree {
+    cexec([cc, "-o", @`out/bin`, ..ldflags, ..objs, ..libs, ..syslibs])
+  }
 
-  let lua_exe = ctx.link(lua_objs, "lua";
-    libs: Tree.of(%{ "liblua.a" => liblua }),
-    ldflags: ["-Wl,-E"],
-    syslibs: ["-lm", "-ldl"],
-  );
+  let lua_exe = link(Tree.of([
+      compile("lua.c"),
+      all_lib_sources.map(compile).archive()
+  ]));
 
   Tree.of(%{
     "bin/lua" => lua_exe,

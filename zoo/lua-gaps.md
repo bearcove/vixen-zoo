@@ -26,9 +26,18 @@
   a `Map[Path, Tree]`. Useful when the process needs access to the whole tree
   (e.g. C compilation needing headers) but only some files are in argv.
 
-- **`writable: [name]` with string names** — When a tree is mounted at root
-  and ranlib needs to modify a file in place, `writable` takes the entry name
-  as a string rather than requiring a `Path`.
+- **No `writable:` — cwd is writable by default** — The spec has an explicit
+  `writable` parameter on exec. We're dropping it: everything under `./` in the
+  sandbox is writable. Mounts are read-only, output goes to cwd. Simpler model.
+
+- **`Stream.next()`** — Takes the first element from a stream. The spec only
+  has `.to_array()` for consuming streams. `.next()` avoids the pointless
+  `.to_array()[0]` pattern when exec produces exactly one result.
+
+- **`.map()` on functions (composition)** — `f.map(g)` composes: calling the
+  result is `g(f(args))`. Used to bake `.next()` into a partially applied
+  `exec`, so `cexec(args)` returns a value directly instead of a stream.
+  Generic type params are checked at instantiation time.
 
 - **UFCS (uniform function call syntax)** — `ctx.compile(file)` desugars to
   `compile(ctx, file)`. The spec has method calls on built-in types but doesn't
