@@ -95,7 +95,7 @@ fn obj_name(file: String) -> String {
 
 fn tree_observer(proc: Process, vfs: Vfs) -> Tree {
     if proc.exit_code != 0 {
-      fail `${process}: ${proc.stderr}`
+      fail `${proc}: ${proc.stderr}`
     };
     vfs.subtree(@"out")
 }
@@ -125,12 +125,14 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree {
   fn link(
     objs: Tree,
   ) -> Tree {
-    cexec([cc, "-o", @`out/bin`, ..ldflags, ..objs, ..libs, ..syslibs])
+    cexec([cc, "-o", @`out/bin`, ..ldflags, ..objs, ..syslibs])
   }
+
+  let liblua = all_lib_sources.map(compile).flatten().archive();
 
   let lua_exe = link(Tree.of([
       compile("lua.c"),
-      all_lib_sources.map(compile).archive()
+      liblua,
   ]));
 
   Tree.of(%{

@@ -30,6 +30,10 @@
   `writable` parameter on exec. We're dropping it: everything under `./` in the
   sandbox is writable. Mounts are read-only, output goes to cwd. Simpler model.
 
+- **`Array[T].map(f)` returns `Stream[U]`** — Mapping over an array produces
+  a stream, not another array. This makes map inherently lazy/concurrent —
+  elements are computed on demand or in parallel by the scheduler.
+
 - **`Stream.next()`** — Takes the first element from a stream. The spec only
   has `.to_array()` for consuming streams. `.next()` avoids the pointless
   `.to_array()[0]` pattern when exec produces exactly one result.
@@ -39,9 +43,35 @@
   `exec`, so `cexec(args)` returns a value directly instead of a stream.
   Generic type params are checked at instantiation time.
 
-- **UFCS (uniform function call syntax)** — `ctx.compile(file)` desugars to
-  `compile(ctx, file)`. The spec has method calls on built-in types but doesn't
-  explicitly confirm user-defined UFCS. We're assuming it works.
+- **`Stream[T].flatten()`** — When `T` is `Tree`, produces a single `Tree`
+  containing all blobs from all trees in the stream. The spec has no stream
+  flattening operation. Used to collect concurrent compilation results into
+  a single tree for archiving/linking.
+
+- **`Stream[T].flat_map(f)`** — Maps `f` over elements and flattens the
+  resulting streams. `stream.flat_map(f)` is equivalent to `stream.map(f).flatten()`.
+  Not in the spec.
+
+- **UFCS (uniform function call syntax)** — `obj.method(args)` desugars to
+  `method(obj, args)`. The spec has method calls on built-in types but doesn't
+  explicitly confirm user-defined UFCS. We're assuming it works. Used for
+  `stringify` on `DiscoveredTool` and UFCS calls like `.archive()`.
+
+- **Pipe operator `|>`** — `a |> f($)` passes the result of `a` as `$` into
+  the next expression. Used to chain exec calls: `cexec([ar, ...]) |> cexec([ranlib, $])`.
+  `$` refers to the left-hand side result.
+
+- **Destructuring `let`** — `let {cc, ar, ranlib} = toolchain;` destructures
+  a struct into local bindings. The spec doesn't explicitly show struct
+  destructuring in `let` bindings.
+
+- **Nested function declarations** — `fn` declarations inside function bodies
+  that close over the enclosing scope. The spec doesn't explicitly allow
+  `fn` inside `fn`. Used for `compile`, `archive`, `link` inside `build()`.
+
+- **`stringify` as UFCS convention** — Defining `fn stringify(self: T) -> String`
+  gives a type a string representation. When a `DiscoveredTool` appears in an
+  exec arg list (which expects strings), it is auto-stringified via this method.
 
 ## Proposed syntax changes (from this sketch)
 
