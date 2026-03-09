@@ -34,6 +34,11 @@
   a stream, not another array. This makes map inherently lazy/concurrent —
   elements are computed on demand or in parallel by the scheduler.
 
+- **`Array[K].to_map(f)` / `Stream[K].to_map(f)`** — Overload of `to_map`:
+  when called with a function, elements become keys and `f(element)` becomes
+  the value. `[:cc, :ar].to_map(discover)` produces `Map[Symbol, DiscoveredTool]`.
+  Without an argument, `to_map()` collects a `Stream[(K, V)]` into `Map[K, V]`.
+
 - **`Stream.next()`** — Takes the first element from a stream. The spec only
   has `.to_array()` for consuming streams. `.next()` avoids the pointless
   `.to_array()[0]` pattern when exec produces exactly one result.
@@ -89,6 +94,17 @@
 - **Top-level `let` bindings** — The spec only allows type and function
   declarations at module scope. Top-level `let` is useful for constants like
   source file lists. Should be added to the spec (at least for immutable bindings).
+
+- **Symbols (`:name`)** — Interned identifiers, compared by identity not content.
+  `:cc` is a `Symbol`, not a `String`. Used as map keys where typos should be
+  caught at compile time. `Symbol` has a `stringify` that returns the name as a
+  `String`. Enables `Map[Symbol, T]` with destructuring:
+  `let {cc, ar} = tools;` where `tools` is `Map[Symbol, DiscoveredTool]`.
+
+- **Bare-name keyword shorthand** — `f(verifier)` is shorthand for
+  `f(verifier: verifier)` when a keyword argument name matches the binding name.
+  Replaces the previous `:verifier` shorthand, freeing `:` prefix for symbols.
+  Same rule already applies to struct literals: `Foo { x, y }` for `Foo { x: x, y: y }`.
 
 ## Spec issues
 
