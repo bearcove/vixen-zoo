@@ -63,11 +63,9 @@ fn discover_c_toolchain(class: ExecutorClass) -> CToolchain {
       let ar = discover_tool(class, "ar");
       let ranlib = discover_tool(class, "ranlib");
 
-      let verifier = () => {
-        verify_tool(class, cc);
-        verify_tool(class, ar);
-        verify_tool(class, ranlib)
-      };
+      // NOTE: this feels weird for demand-driven
+      let verify = verify_tool(class, ..);
+      let verifier = () => [cc, ar, ranlib].map(verify);
 
       CToolchain { cc, ar, ranlib, verifier }
     },
@@ -81,24 +79,16 @@ let {cc, ar, ranlib} = toolchain;
 
 let cexec = exec(..;
     verifier: toolchain.verifier,
-    observer: tree_observer,
+    observer: (proc, vfs) => {
+      if proc.exit_code != 0 {
+        fail `${proc}: ${proc.stderr}`
+      };
+      vfs.subtree(@"out")
+    },
 ).map($.next());
 let cflags = ["-Wall", "-O2", "-std=c99", "-DLUA_USE_LINUX"];
 let ldflags = ["-Wl,-E"];
 let syslibs = ["-lm","-dl"];
-
-// --- Helpers ---
-
-fn obj_name(file: String) -> String {
-  file.replace(".c", ".o")
-}
-
-fn tree_observer(proc: Process, vfs: Vfs) -> Tree {
-    if proc.exit_code != 0 {
-      fail `${proc}: ${proc.stderr}`
-    };
-    vfs.subtree(@"out")
-}
 
 // --- Build entry point ---
 
