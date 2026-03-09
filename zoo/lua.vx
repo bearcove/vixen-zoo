@@ -70,6 +70,17 @@ fn discover_c_toolchain(class: ExecutorClass) -> CToolchain {
   )
 }
 
+// --- Build context ---
+
+struct CBuild {
+  toolchain: CToolchain,
+  src: Tree,
+  cflags: Array[String],
+}
+
+// Shadow exec with writable defaulted
+let exec = exec(..; writable: [@"out"])
+
 // --- Helpers ---
 
 fn obj_name(file: String) -> String {
@@ -96,73 +107,50 @@ fn tree_observer(label: String, path: Path) -> Fn(Process, Vfs) -> Stream[Tree] 
   }
 }
 
-// --- Compilation ---
+// --- Compilation (UFCS: ctx.compile(file)) ---
 
-fn compile_c(
-  file: String;
-  src: Tree,
-  toolchain: CToolchain,
-  cflags: Array[String] = [],
-) -> Blob {
+fn compile(ctx: CBuild, file: String) -> Blob {
   let oname = obj_name(file);
-
   exec[Blob](
-    [toolchain.cc.path, "-c", ..cflags, "-o", @`out/${oname}`, @`src/${file}`],
-    mounts: %{ @"src" => src },
-    writable: [@"out"],
-    verifier: toolchain.verifier,
+    [ctx.toolchain.cc.path, "-c", ..ctx.cflags, "-o", @`out/${oname}`, file],
+    mounts: ctx.src,
+    verifier: ctx.toolchain.verifier,
     observer: file_observer(`cc ${file}`, @`out/${oname}`),
   ).to_array()[0]
 }
 
-// --- Archiving ---
+// --- Archiving (UFCS: ctx.archive(objs, "liblua.a")) ---
 
-fn archive(
-  obj_tree: Tree,
-  obj_names: Array[String],
-  output_name: String,
-  toolchain: CToolchain,
-) -> Blob {
+fn archive(ctx: CBuild, objs: Tree, output_name: String) -> Blob {
   let archived = exec[Tree](
-    [toolchain.ar.path, "rc", @`out/${output_name}`,
-     ..obj_names.map(@`objs/${$}`)],
-    mounts: %{ @"objs" => obj_tree },
-    writable: [@"out"],
-    verifier: toolchain.verifier,
+    [ctx.toolchain.ar.path, "rc", @`out/${output_name}`, ..objs],
+    verifier: ctx.toolchain.verifier,
     observer: tree_observer(`ar ${output_name}`, @"out"),
   ).to_array()[0];
 
-  // ranlib: generate the index
   exec[Blob](
-    [toolchain.ranlib.path, @`lib/${output_name}`],
-    mounts: %{ @"lib" => archived },
-    writable: [@"lib"],
-    verifier: toolchain.verifier,
-    observer: file_observer(`ranlib ${output_name}`, @`lib/${output_name}`),
+    [ctx.toolchain.ranlib.path, output_name],
+    mounts: archived,
+    writable: [output_name],
+    verifier: ctx.toolchain.verifier,
+    observer: file_observer(`ranlib ${output_name}`, @`${output_name}`),
   ).to_array()[0]
 }
 
-// --- Linking ---
+// --- Linking (UFCS: ctx.link(objs, "lua"; ...)) ---
 
-fn link_executable(
-  obj_tree: Tree,
-  obj_names: Array[String],
-  output_name: String,
-  toolchain: CToolchain;
-  lib_tree: Tree = Tree.empty(),
-  lib_names: Array[String] = [],
+fn link(
+  ctx: CBuild,
+  objs: Tree,
+  output_name: String;
+  libs: Tree = Tree.empty(),
   ldflags: Array[String] = [],
-  libs: Array[String] = [],
+  syslibs: Array[String] = [],
 ) -> Blob {
   exec[Blob](
-    [toolchain.cc.path, "-o", @`out/${output_name}`,
-     ..ldflags,
-     ..obj_names.map(@`objs/${$}`),
-     ..lib_names.map(@`libs/${$}`),
-     ..libs],
-    mounts: %{ @"objs" => obj_tree, @"libs" => lib_tree },
-    writable: [@"out"],
-    verifier: toolchain.verifier,
+    [ctx.toolchain.cc.path, "-o", @`out/${output_name}`,
+     ..ldflags, ..objs, ..libs, ..syslibs],
+    verifier: ctx.toolchain.verifier,
     observer: file_observer(`link ${output_name}`, @`out/${output_name}`),
   ).to_array()[0]
 }
@@ -170,34 +158,26 @@ fn link_executable(
 // --- Build entry point ---
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree {
-  let src_tree = Tree.from_path(ws);
+  let ctx = CBuild {
+    toolchain: discover_c_toolchain(executor_class("default")),
+    src: Tree.from_path(ws),
+    cflags: ["-Wall", "-O2", "-std=c99", "-DLUA_USE_LINUX"],
+  };
 
-  let class = executor_class("default");
-  let toolchain = discover_c_toolchain(class);
+  // Compile all library sources concurrently
+  let lib_objs = Tree.of(all_lib_sources.map((file) => {
+    (obj_name(file), ctx.compile(file))
+  }).to_map());
 
-  let cflags = ["-Wall", "-O2", "-std=c99", "-DLUA_USE_LINUX"];
+  let liblua = ctx.archive(lib_objs, "liblua.a");
 
-  // Compile all library sources concurrently — produces (obj_name, blob) pairs
-  let lib_obj_map = all_lib_sources.map((file) => {
-    (obj_name(file), compile_c(file; src: src_tree, :toolchain, :cflags))
-  }).to_map();
-  let lib_obj_tree = Tree.of(lib_obj_map);
-  let lib_obj_names = all_lib_sources.map(obj_name($)).to_array();
+  // Compile and link the interpreter
+  let lua_objs = Tree.of(%{ "lua.o" => ctx.compile("lua.c") });
 
-  // Archive into liblua.a
-  let liblua = archive(lib_obj_tree, lib_obj_names, "liblua.a", toolchain);
-
-  // Compile lua.c (the interpreter main)
-  let lua_blob = compile_c("lua.c"; src: src_tree, :toolchain, :cflags);
-  let lua_obj_tree = Tree.of(%{ "lua.o" => lua_blob });
-
-  // Link the interpreter
-  let lua_exe = link_executable(
-    lua_obj_tree, ["lua.o"], "lua", toolchain;
-    lib_tree: Tree.of(%{ "liblua.a" => liblua }),
-    lib_names: ["liblua.a"],
+  let lua_exe = ctx.link(lua_objs, "lua";
+    libs: Tree.of(%{ "liblua.a" => liblua }),
     ldflags: ["-Wl,-E"],
-    libs: ["-lm", "-ldl"],
+    syslibs: ["-lm", "-ldl"],
   );
 
   Tree.of(%{

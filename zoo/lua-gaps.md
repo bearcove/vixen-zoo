@@ -16,6 +16,24 @@
   whether the values can be `Blob` (flat file tree) or only `Tree`/`Blob | Tree`.
   We're assuming `Map[String, Blob]` works to build a flat directory of files.
 
+- **`..tree` spread in exec args** — Spreading a `Tree` into an arg array
+  yields its `Blob`s. Blobs carry their names. When a `Blob` appears in exec
+  args, it is auto-mounted (by name, hash-prefixed if conflicts). This replaces
+  manual `mounts:` maps + name tracking for the common case where every mounted
+  file IS an argument (ar, ld). Exec args become `Array[String | Path | Blob]`.
+
+- **`mounts: tree` (bare Tree)** — Mount a tree at root instead of requiring
+  a `Map[Path, Tree]`. Useful when the process needs access to the whole tree
+  (e.g. C compilation needing headers) but only some files are in argv.
+
+- **`writable: [name]` with string names** — When a tree is mounted at root
+  and ranlib needs to modify a file in place, `writable` takes the entry name
+  as a string rather than requiring a `Path`.
+
+- **UFCS (uniform function call syntax)** — `ctx.compile(file)` desugars to
+  `compile(ctx, file)`. The spec has method calls on built-in types but doesn't
+  explicitly confirm user-defined UFCS. We're assuming it works.
+
 ## Proposed syntax changes (from this sketch)
 
 - **Path literals: `@"src"` / `` @`out/${name}` ``** — `@` prefix on double-quoted
